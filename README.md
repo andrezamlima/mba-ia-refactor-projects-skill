@@ -1,3 +1,4 @@
+
 # Desafio 03 — Skill `/refactor-arch`
 
 Skill para Claude Code que automatiza análise, auditoria e refatoração arquitetural de projetos legados para o padrão MVC. Agnóstica de tecnologia — funciona com Python/Flask e Node.js/Express.
@@ -372,4 +373,4 @@ reports/
 ├── audit-project-1.md   ← code-smells-project  (13 findings: 5C/3H/2M/3L)
 ├── audit-project-2.md   ← ecommerce-api-legacy (12 findings: 4C/4H/2M/2L)
 └── audit-project-3.md   ← task-manager-api     (12 findings: 2C/3H/4M/3L)
-```
+``

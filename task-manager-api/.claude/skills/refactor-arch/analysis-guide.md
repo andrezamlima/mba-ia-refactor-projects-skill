@@ -40,6 +40,14 @@ If a project has both `.js` and `.ts`, report **TypeScript** (TS projects always
 - `@nestjs/core` → **NestJS**
 - Verify version from `package.json`
 
+### PHP
+- Read `composer.json` → `require` section
+- `laravel/framework` → **Laravel** (check `"laravel/framework": "^10.x"` for version)
+- `symfony/http-kernel` → **Symfony**
+- `codeigniter4/framework` → **CodeIgniter 4**
+- Also check: presence of `artisan` file at project root → confirms Laravel
+- Check `config/app.php` → `'version'` key for Laravel version
+
 ---
 
 ## Step 3 — Detect Database
@@ -51,9 +59,11 @@ If a project has both `.js` and `.ts`, report **TypeScript** (TS projects always
 - `pymongo`, `mongoose` → **MongoDB**
 - `:memory:` in database connection → **SQLite in-memory**
 - `psycopg2`, `asyncpg` → **PostgreSQL**
+- PHP/Laravel: `DB_CONNECTION=mysql` in `.env` → **MySQL**; `DB_CONNECTION=pgsql` → **PostgreSQL**; `DB_CONNECTION=sqlite` → **SQLite**
+- Laravel Eloquent models in `app/Models/` — class names map to table names (e.g., `User` → `users`, `Product` → `products`)
 
 ### Extract DB tables
-Look for `CREATE TABLE` statements in any `.py`, `.js`, or `.sql` file. List all table names found.
+Look for `CREATE TABLE` statements in any `.py`, `.js`, `.php`, or `.sql` file. For Laravel projects, list all Eloquent model class names found in `app/Models/` — each maps to a pluralized snake_case table.
 
 ---
 
@@ -102,6 +112,7 @@ Analyze the project's file structure and classify:
 Count all source files analyzed (only code files, not config/data files):
 - Python: count `.py` files (exclude `__pycache__`, `.pyc`, migrations)
 - Node.js: count `.js` and `.ts` files (exclude `node_modules/`, `dist/`, `build/`)
+- PHP/Laravel: count `.php` files (exclude `vendor/`, `bootstrap/cache/`, compiled views in `storage/`)
 
 ---
 
@@ -152,3 +163,21 @@ DB tables:     produtos, usuarios, pedidos, itens_pedido
 - Controllers decorated with `@Controller`
 - Services decorated with `@Injectable`
 - Modules decorated with `@Module`
+
+### Laravel Projects
+- Entry point: `public/index.php` (HTTP) + `artisan` (CLI)
+- Routes: `routes/web.php` (HTML), `routes/api.php` (JSON API)
+- Controllers: `app/Http/Controllers/`
+- Models: `app/Models/` (Eloquent ORM)
+- Views: `resources/views/` (Blade templates — `.blade.php`)
+- Config: `config/` + `.env` (never `config/database.php` directly)
+- Middleware: `app/Http/Middleware/`
+- Services: `app/Services/` (if present)
+- Migrations: `database/migrations/` — read these to list DB tables
+- Validation: `app/Http/Requests/` (Form Requests) OR inline `$request->validate([...])`
+- Architecture assessment signals:
+  - Fat Controller (HIGH): controller method >50 lines with DB queries, business logic, and HTTP response all mixed
+  - Missing Form Requests (MEDIUM): validation inline in controller instead of dedicated `FormRequest` class
+  - Logic in Blade views (HIGH): `@php` blocks with business calculations in `.blade.php` files
+  - Direct `DB::` in controllers (CRITICAL): raw SQL or `DB::select(...)` in controller instead of model/repository
+  - Missing API Resources (MEDIUM): `$model->toArray()` or `$model` returned directly instead of `Resource` class

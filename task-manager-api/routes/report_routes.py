@@ -1,11 +1,11 @@
 from flask import Blueprint, request, jsonify
+from sqlalchemy import func
 from database import db
 from models.task import Task
 from models.user import User
 from models.category import Category
 from datetime import datetime, timedelta
-from utils.helpers import format_date, calculate_percentage
-import json
+from utils.helpers import calculate_percentage
 
 report_bp = Blueprint('reports', __name__)
 
@@ -34,7 +34,7 @@ def summary_report():
         if t.due_date:
             if t.due_date < datetime.utcnow():
                 if t.status != 'done' and t.status != 'cancelled':
-                    overdue_count = overdue_count + 1
+                    overdue_count += 1
                     overdue_list.append({
                         'id': t.id,
                         'title': t.title,
@@ -50,21 +50,26 @@ def summary_report():
         Task.updated_at >= seven_days_ago
     ).count()
 
+    user_task_counts = dict(
+        db.session.query(Task.user_id, func.count(Task.id))
+        .group_by(Task.user_id).all()
+    )
+    user_done_counts = dict(
+        db.session.query(Task.user_id, func.count(Task.id))
+        .filter(Task.status == 'done')
+        .group_by(Task.user_id).all()
+    )
     users = User.query.all()
     user_stats = []
     for u in users:
-        user_tasks = Task.query.filter_by(user_id=u.id).all()
-        total = len(user_tasks)
-        completed = 0
-        for t in user_tasks:
-            if t.status == 'done':
-                completed = completed + 1
+        total = user_task_counts.get(u.id, 0)
+        completed = user_done_counts.get(u.id, 0)
         user_stats.append({
             'user_id': u.id,
             'user_name': u.name,
             'total_tasks': total,
             'completed_tasks': completed,
-            'completion_rate': round((completed / total) * 100, 2) if total > 0 else 0
+            'completion_rate': calculate_percentage(completed, total),
         })
 
     report = {
@@ -104,7 +109,7 @@ def summary_report():
 def user_report(user_id):
     user = User.query.get(user_id)
     if not user:
-        return jsonify({'error': 'Usuário não encontrado'}), 404
+        return jsonify({'error': 'Usuario nao encontrado'}), 404
 
     tasks = Task.query.filter_by(user_id=user_id).all()
 
@@ -118,21 +123,20 @@ def user_report(user_id):
 
     for t in tasks:
         if t.status == 'done':
-            done = done + 1
+            done += 1
         elif t.status == 'pending':
-            pending = pending + 1
+            pending += 1
         elif t.status == 'in_progress':
-            in_progress = in_progress + 1
+            in_progress += 1
         elif t.status == 'cancelled':
-            cancelled = cancelled + 1
+            cancelled += 1
 
         if t.priority <= 2:
-            high_priority = high_priority + 1
+            high_priority += 1
 
-        if t.due_date:
-            if t.due_date < datetime.utcnow():
-                if t.status != 'done' and t.status != 'cancelled':
-                    overdue = overdue + 1
+        if t.due_date and t.due_date < datetime.utcnow():
+            if t.status not in ('done', 'cancelled'):
+                overdue += 1
 
     report = {
         'user': {
@@ -148,7 +152,7 @@ def user_report(user_id):
             'cancelled': cancelled,
             'overdue': overdue,
             'high_priority': high_priority,
-            'completion_rate': round((done / total) * 100, 2) if total > 0 else 0
+            'completion_rate': calculate_percentage(done, total),
         }
     }
 
@@ -168,11 +172,11 @@ def get_categories():
 def create_category():
     data = request.get_json()
     if not data:
-        return jsonify({'error': 'Dados inválidos'}), 400
+        return jsonify({'error': 'Dados invalidos'}), 400
 
     name = data.get('name')
     if not name:
-        return jsonify({'error': 'Nome é obrigatório'}), 400
+        return jsonify({'error': 'Nome e obrigatorio'}), 400
 
     category = Category()
     category.name = name
@@ -191,7 +195,7 @@ def create_category():
 def update_category(cat_id):
     cat = Category.query.get(cat_id)
     if not cat:
-        return jsonify({'error': 'Categoria não encontrada'}), 404
+        return jsonify({'error': 'Categoria nao encontrada'}), 404
 
     data = request.get_json()
     if 'name' in data:
@@ -212,7 +216,7 @@ def update_category(cat_id):
 def delete_category(cat_id):
     cat = Category.query.get(cat_id)
     if not cat:
-        return jsonify({'error': 'Categoria não encontrada'}), 404
+        return jsonify({'error': 'Categoria nao encontrada'}), 404
 
     try:
         db.session.delete(cat)

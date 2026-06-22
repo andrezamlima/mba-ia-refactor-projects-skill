@@ -11,11 +11,11 @@ You are an expert software architect and code quality specialist. When this skil
 ### Steps
 
 1. Read ALL source code files in the current directory (recursively). Focus on:
-   - Entry point files (`app.py`, `app.js`, `index.js`, `main.py`, `server.js`, etc.)
-   - All Python (`.py`) or JavaScript/TypeScript (`.js`, `.ts`) source files
-   - Dependency manifests (`requirements.txt`, `package.json`, `pyproject.toml`, `Pipfile`)
-   - Configuration files (`.env`, `config.py`, `settings.py`)
-   - Database files or schema definitions
+   - Entry point files (`app.py`, `app.js`, `index.js`, `main.py`, `server.js`, `artisan`, `public/index.php`, etc.)
+   - All Python (`.py`), JavaScript/TypeScript (`.js`, `.ts`), or PHP (`.php`) source files
+   - Dependency manifests (`requirements.txt`, `package.json`, `pyproject.toml`, `Pipfile`, `composer.json`)
+   - Configuration files (`.env`, `config.py`, `settings.py`, `config/app.php`, `config/database.php`)
+   - Database files, schema definitions, and migration files (`database/migrations/`)
 
 2. Load and consult `analysis-guide.md` to apply the detection heuristics.
 
@@ -109,7 +109,10 @@ Proceed with Phase 3 — Refactoring? [y/n]
 5. Ensure the original entry point (`app.py`, `app.js`) is updated or replaced to serve as the composition root — it should only wire together the MVC components.
 
 6. **Validation:**
-   - Attempt to start the application: `python app.py` (Python) or `node app.js` / `npm start` (Node.js)
+   - Attempt to start the application:
+     - Python/Flask: `python app.py`
+     - Node.js/Express: `node app.js` or `npm start`
+     - PHP/Laravel: `php artisan serve` (runs on `http://localhost:8000`)
    - Report which endpoints are available
    - Confirm the application boots without errors
 

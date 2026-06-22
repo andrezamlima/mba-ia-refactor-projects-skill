@@ -43,7 +43,37 @@ function getUser(username) {
 }
 ```
 
-> Apply to every `execute()` / `prepare().run()` / `prepare().get()` / `prepare().all()` call that incorporates a variable.
+### PHP/Laravel — Before
+```php
+// VULNERABLE: raw DB query with string concat
+public function getUser($id) {
+    return DB::select("SELECT * FROM users WHERE id = " . $id);
+}
+public function search(Request $request) {
+    $name = $request->input('name');
+    return DB::select("SELECT * FROM users WHERE name = '" . $name . "'");
+}
+```
+
+### PHP/Laravel — After
+```php
+// SAFE: Eloquent (recommended — always parameterized)
+public function getUser($id) {
+    return User::findOrFail($id);
+}
+
+// SAFE: Query Builder with bindings
+public function search(Request $request) {
+    return DB::select("SELECT * FROM users WHERE name = ?", [$request->input('name')]);
+}
+
+// SAFE: Eloquent where() — also always parameterized
+public function searchByName(string $name) {
+    return User::where('name', 'LIKE', '%' . $name . '%')->get();
+}
+```
+
+> Apply to every `DB::select()`, `DB::statement()`, `DB::insert()`, and raw `$pdo->query()` call that uses a variable.
 
 ---
 
@@ -97,6 +127,50 @@ const DB_PASSWORD = process.env.DB_PASSWORD;
 if (!SECRET_KEY || !DB_PASSWORD) {
   throw new Error('Missing required environment variables');
 }
+```
+
+### PHP/Laravel — Before
+```php
+// VULNERABLE — hardcoded in config/services.php or in a class
+'stripe' => ['secret' => 'sk_live_AbCdEfGhIjKl'],
+
+class PaymentService {
+    private $apiKey = 'sk_live_AbCdEfGhIjKl';
+}
+```
+
+### PHP/Laravel — After
+```php
+// SAFE — config/services.php references env()
+'stripe' => [
+    'secret' => env('STRIPE_SECRET_KEY'),
+    'webhook_secret' => env('STRIPE_WEBHOOK_SECRET'),
+],
+
+// SAFE — service reads from config (never from env() directly in a class)
+class PaymentService {
+    public function __construct(
+        private string $apiKey = ''
+    ) {
+        $this->apiKey = config('services.stripe.secret');
+    }
+}
+```
+
+`.env` (never commit):
+```
+STRIPE_SECRET_KEY=sk_live_AbCdEfGhIjKl
+STRIPE_WEBHOOK_SECRET=whsec_xyz
+APP_KEY=base64:...
+DB_PASSWORD=strong-password
+```
+
+`.env.example` (commit this):
+```
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+APP_KEY=
+DB_PASSWORD=
 ```
 
 ---
@@ -209,6 +283,48 @@ async function createUser(req, res) {
 module.exports = { listUsers, createUser };
 ```
 
+### PHP/Laravel — Before
+```php
+// VULNERABLE: Fat controller — DB, business logic, email all mixed
+class OrderController extends Controller {
+    public function store(Request $request) {
+        // 10 lines of manual validation
+        $user = User::find($request->user_id);
+        $product = Product::find($request->product_id);
+        $total = $product->price * $request->quantity;
+        $order = Order::create(['user_id' => $user->id, 'total' => $total]);
+        // payment processing inline
+        $charge = \Stripe\Charge::create(['amount' => $total * 100, 'currency' => 'brl']);
+        // email inline
+        Mail::to($user->email)->send(new OrderConfirmed($order));
+        return response()->json($order->toArray()); // exposes internal fields
+    }
+}
+```
+
+### PHP/Laravel — After
+```php
+// SAFE: thin controller — delegates to service, uses FormRequest + Resource
+class OrderController extends Controller {
+    public function __construct(private OrderService $orderService) {}
+
+    public function store(StoreOrderRequest $request): JsonResponse {
+        $order = $this->orderService->place($request->user(), $request->validated());
+        return new OrderResource($order);
+    }
+}
+
+// app/Services/OrderService.php
+class OrderService {
+    public function place(User $user, array $data): Order {
+        $order = Order::create([...]);
+        PaymentService::charge($order);
+        $user->notify(new OrderPlacedNotification($order));
+        return $order;
+    }
+}
+```
+
 ---
 
 ## PT-04: Plain-Text Passwords → bcrypt / werkzeug Hashing
@@ -279,6 +395,49 @@ async function login(username, password) {
     return generateToken(user);
   }
   return null;
+}
+```
+
+### PHP/Laravel — Before
+```php
+// VULNERABLE: md5 or sha1 for password storage
+class AuthController extends Controller {
+    public function register(Request $request) {
+        User::create([
+            'email'    => $request->email,
+            'password' => md5($request->password),  // BROKEN — no salt
+        ]);
+    }
+    public function login(Request $request) {
+        $user = User::where('email', $request->email)->first();
+        if ($user && $user->password === md5($request->password)) {
+            return response()->json(['token' => 'fake-token']);
+        }
+    }
+}
+```
+
+### PHP/Laravel — After
+```php
+// SAFE: Laravel's Hash facade (bcrypt by default, configurable to argon2)
+use Illuminate\Support\Facades\Hash;
+
+class AuthController extends Controller {
+    public function register(StoreUserRequest $request) {
+        $user = User::create([
+            'email'    => $request->email,
+            'password' => Hash::make($request->password),  // bcrypt with auto salt
+        ]);
+        return new UserResource($user);
+    }
+
+    public function login(Request $request) {
+        $user = User::where('email', $request->email)->first();
+        if ($user && Hash::check($request->password, $user->password)) {
+            return response()->json(['token' => $user->createToken('api')->plainTextToken]);
+        }
+        return response()->json(['error' => 'Invalid credentials'], 401);
+    }
 }
 ```
 
@@ -367,6 +526,26 @@ function findAll() {
 module.exports = { findAll };
 ```
 
+### PHP/Laravel — Note
+Laravel's Eloquent handles DB connections through the IoC container automatically — there is no global mutable connection to fix. However, watch for hand-rolled PDO singletons or static properties that bypass the framework:
+
+```php
+// VULNERABLE: hand-rolled singleton (bypasses Laravel's container)
+class LegacyDB {
+    private static $pdo = null;
+    public static function get(): PDO {
+        if (!self::$pdo) self::$pdo = new PDO(getenv('DATABASE_URL'));
+        return self::$pdo;
+    }
+}
+
+// SAFE: use Laravel's DB facade or Eloquent (managed by the container)
+// No singleton needed — Laravel manages the connection pool
+$users = DB::select('SELECT id, email FROM users WHERE active = 1');
+// or
+$users = User::where('active', true)->get();
+```
+
 ---
 
 ## PT-06: N+1 Queries → JOIN SQL
@@ -450,6 +629,37 @@ for (const row of rows) {
 const result = Array.from(ordersMap.values());
 ```
 
+### PHP/Laravel — Before (Eloquent N+1)
+```php
+// VULNERABLE: N+1 — 1 + N queries (one per user)
+$users = User::all();
+foreach ($users as $user) {
+    echo $user->orders->count();  // triggers DB query per user
+    echo $user->profile->bio;     // another query per user
+}
+```
+
+### PHP/Laravel — After (Eager Loading)
+```php
+// SAFE: 3 total queries regardless of user count (users + orders + profiles)
+$users = User::with(['orders', 'profile'])->get();
+foreach ($users as $user) {
+    echo $user->orders->count();  // in-memory — no DB
+    echo $user->profile->bio;     // in-memory — no DB
+}
+
+// SAFE: conditional eager loading (load only what's needed for the view)
+$users = User::with(['orders' => function ($query) {
+    $query->where('status', 'active')->select('id', 'user_id', 'total');
+}])->get();
+
+// SAFE: for aggregations, use withCount() instead of loading all records
+$users = User::withCount('orders')->get();
+foreach ($users as $user) {
+    echo $user->orders_count;  // no N+1
+}
+```
+
 ---
 
 ## PT-07: Duplicated Code → Extract Shared Helper Function
@@ -530,6 +740,50 @@ function validateUserFields(data, { requireId = false } = {}) {
 // Usage:
 validateUserFields(data);                  // create
 validateUserFields(data, { requireId: true }); // update
+```
+
+### PHP/Laravel — Before
+```php
+// VULNERABLE: duplicated validation in store() and update()
+class ProductController extends Controller {
+    public function store(Request $request) {
+        if (!$request->name) return response()->json(['error' => 'name required'], 400);
+        if ($request->price < 0) return response()->json(['error' => 'invalid price'], 400);
+        if (strlen($request->name) > 200) return response()->json(['error' => 'name too long'], 400);
+        Product::create($request->all());
+    }
+    public function update(Request $request, $id) {
+        if (!$request->name) return response()->json(['error' => 'name required'], 400);
+        if ($request->price < 0) return response()->json(['error' => 'invalid price'], 400);
+        // duplicated — and missing the length check
+        Product::findOrFail($id)->update($request->all());
+    }
+}
+```
+
+### PHP/Laravel — After (FormRequest pattern)
+```php
+// SAFE: shared validation in a FormRequest
+// app/Http/Requests/ProductRequest.php
+class ProductRequest extends FormRequest {
+    public function rules(): array {
+        return [
+            'name'  => ['required', 'string', 'min:3', 'max:200'],
+            'price' => ['required', 'numeric', 'min:0'],
+        ];
+    }
+}
+
+// SAFE: controller injects FormRequest — validation is automatic
+class ProductController extends Controller {
+    public function store(ProductRequest $request) {
+        return new ProductResource(Product::create($request->validated()));
+    }
+    public function update(ProductRequest $request, Product $product) {
+        $product->update($request->validated());
+        return new ProductResource($product);
+    }
+}
 ```
 
 ---
@@ -655,6 +909,52 @@ async function createOrder(req, res) {
 module.exports = { createOrder };
 ```
 
+### PHP/Laravel — Before
+```php
+// VULNERABLE: side-effects in controller
+public function store(Request $request) {
+    $order = Order::create($request->validated());
+    // Email inline in controller
+    Mail::to($order->user->email)->send(new OrderConfirmed($order));
+    // Payment inline in controller
+    \Stripe\Charge::create(['amount' => $order->total * 100, 'currency' => 'brl']);
+    return response()->json($order);
+}
+```
+
+### PHP/Laravel — After
+```php
+// SAFE: use Laravel Events/Listeners for side effects (most idiomatic)
+// Or inject a Service class
+
+// app/Services/OrderService.php
+class OrderService {
+    public function place(User $user, array $data): Order {
+        return DB::transaction(function () use ($user, $data) {
+            $order = Order::create($data + ['user_id' => $user->id]);
+            // Fire event — listeners handle email, payment, etc.
+            event(new OrderPlaced($order));
+            return $order;
+        });
+    }
+}
+
+// app/Listeners/SendOrderConfirmation.php
+class SendOrderConfirmation {
+    public function handle(OrderPlaced $event): void {
+        Mail::to($event->order->user)->send(new OrderConfirmed($event->order));
+    }
+}
+
+// app/Http/Controllers/OrderController.php (thin controller)
+class OrderController extends Controller {
+    public function store(StoreOrderRequest $request, OrderService $service): JsonResponse {
+        $order = $service->place($request->user(), $request->validated());
+        return new OrderResource($order);
+    }
+}
+```
+
 ---
 
 ## PT-09: Admin Endpoints → Auth Middleware
@@ -768,6 +1068,39 @@ router.get('/users', requireAdmin, listUsers);
 module.exports = router;
 ```
 
+### PHP/Laravel — Before
+```php
+// VULNERABLE: unprotected admin routes
+// routes/api.php
+Route::prefix('admin')->group(function () {
+    Route::get('/users', [AdminController::class, 'index']);   // no auth!
+    Route::delete('/users/{id}', [AdminController::class, 'destroy']);
+});
+```
+
+### PHP/Laravel — After
+```php
+// SAFE: middleware at route group level
+Route::prefix('admin')
+    ->middleware(['auth:sanctum', 'role:admin'])  // requires token + admin role
+    ->group(function () {
+        Route::get('/users', [AdminController::class, 'index']);
+        Route::delete('/users/{id}', [AdminController::class, 'destroy']);
+    });
+
+// Custom 'role' middleware — app/Http/Middleware/EnsureUserHasRole.php
+class EnsureUserHasRole {
+    public function handle(Request $request, Closure $next, string $role): Response {
+        if ($request->user()?->role !== $role) {
+            abort(403, 'Insufficient permissions');
+        }
+        return $next($request);
+    }
+}
+// Register in app/Http/Kernel.php:
+// 'role' => \App\Http\Middleware\EnsureUserHasRole::class,
+```
+
 ---
 
 ## PT-10: Print Logging → Structured Logger
@@ -837,6 +1170,44 @@ function createUser(data) {
     throw err;
   }
 }
+```
+
+### PHP/Laravel — Before
+```php
+// VULNERABLE: dd(), var_dump(), echo in production code
+public function store(Request $request) {
+    dd($request->all());         // halts execution — never in production!
+    var_dump($request->input()); // raw PHP dump
+    echo "Processing order...";  // uncontrolled output
+
+    return Order::create($request->validated());
+}
+```
+
+### PHP/Laravel — After
+```php
+// SAFE: Laravel's Log facade — PSR-3 compliant, configurable channels
+use Illuminate\Support\Facades\Log;
+
+public function store(StoreOrderRequest $request) {
+    Log::info('Processing new order', [
+        'user_id' => $request->user()->id,
+        'items'   => count($request->items),
+    ]);
+
+    try {
+        $order = $this->orderService->place($request->user(), $request->validated());
+        Log::info('Order placed successfully', ['order_id' => $order->id]);
+        return new OrderResource($order);
+    } catch (\Exception $e) {
+        Log::error('Order placement failed', [
+            'user_id' => $request->user()->id,
+            'error'   => $e->getMessage(),
+        ]);
+        return response()->json(['error' => 'Order could not be processed'], 500);
+    }
+}
+// Channels configured in config/logging.php — stack, daily, slack, etc.
 ```
 
 ---
@@ -914,6 +1285,52 @@ app.get('/users/:id', (req, res) => {
   if (!user) return res.status(404).json({ error: 'Not found' });
   res.json(user);
 });
+```
+
+### PHP/Laravel — Before
+```php
+// VULNERABLE: password field and internal fields exposed
+class UserController extends Controller {
+    public function show($id) {
+        $user = User::findOrFail($id);
+        return response()->json($user->toArray()); // exposes password, remember_token
+    }
+    public function index() {
+        return response()->json(User::all()); // same problem at scale
+    }
+}
+```
+
+### PHP/Laravel — After
+```php
+// SAFE: API Resource controls exact fields returned
+// app/Http/Resources/UserResource.php
+class UserResource extends JsonResource {
+    public function toArray($request): array {
+        return [
+            'id'         => $this->id,
+            'name'       => $this->name,
+            'email'      => $this->email,
+            'role'       => $this->role,
+            'created_at' => $this->created_at->toIso8601String(),
+            // 'password' and 'remember_token' deliberately omitted
+        ];
+    }
+}
+
+class UserController extends Controller {
+    public function show(User $user): UserResource {
+        return new UserResource($user);
+    }
+    public function index(): AnonymousResourceCollection {
+        return UserResource::collection(User::paginate());
+    }
+}
+
+// Also protect the model itself:
+class User extends Model {
+    protected $hidden = ['password', 'remember_token']; // belt-and-suspenders
+}
 ```
 
 ---
@@ -994,6 +1411,52 @@ function applyDiscount(price, cardPrefix) {
 }
 function validatePassword(password) {
   if (password.length < 8) throw new Error('too short');
+}
+```
+
+### PHP/Laravel — Before
+```php
+// VULNERABLE: magic values scattered
+public function applyDiscount(float $price, string $tier): float {
+    if ($tier === 'gold') return $price * 0.85;
+    if ($tier === 'silver') return $price * 0.90;
+    if ($price > 1000) return $price * 0.95;
+    return $price;
+}
+public function validatePassword(string $pwd): bool {
+    return strlen($pwd) >= 8;
+}
+```
+
+### PHP/Laravel — After
+```php
+// app/Constants/Discount.php
+final class Discount {
+    const GOLD_RATE   = 0.15;  // 15% off
+    const SILVER_RATE = 0.10;  // 10% off
+    const BULK_RATE   = 0.05;  // 5% off for orders > threshold
+    const BULK_THRESHOLD = 1000;
+}
+
+// app/Constants/Auth.php
+final class Auth {
+    const MIN_PASSWORD_LENGTH       = 8;
+    const MIN_PASSWORD_LENGTH_ADMIN = 12;
+    const TOKEN_TTL_MINUTES         = 60;
+}
+
+// Usage
+use App\Constants\Discount;
+use App\Constants\Auth;
+
+public function applyDiscount(float $price, string $tier): float {
+    if ($tier === 'gold')   return $price * (1 - Discount::GOLD_RATE);
+    if ($tier === 'silver') return $price * (1 - Discount::SILVER_RATE);
+    if ($price > Discount::BULK_THRESHOLD) return $price * (1 - Discount::BULK_RATE);
+    return $price;
+}
+public function validatePassword(string $pwd): bool {
+    return strlen($pwd) >= Auth::MIN_PASSWORD_LENGTH;
 }
 ```
 

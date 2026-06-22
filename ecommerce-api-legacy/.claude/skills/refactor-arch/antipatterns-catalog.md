@@ -13,6 +13,7 @@ Reference catalog for the `/refactor-arch` skill. Each entry maps to a detection
 **Detection signals:**
 - String formatting (`%s %`, `.format()`, f-strings, `+` concatenation) used to build a SQL string that is then passed to `cursor.execute()`, `db.execute()`, `connection.query()`, or equivalent.
 - Variable names such as `query`, `sql`, `stmt` whose value includes `{user_input}` or `+ variable`.
+- PHP/Laravel: `DB::select("SELECT * FROM users WHERE id = " . $id)`, `DB::statement("UPDATE ... WHERE name = '" . $name . "'")`, or raw `$pdo->query("SELECT..." . $var)` — string concatenation inside any `DB::` facade call or PDO method.
 
 **Example (Python — vulnerable):**
 ```python
@@ -31,6 +32,17 @@ function getUser(username) {
 }
 ```
 
+**Example (PHP/Laravel — vulnerable):**
+```php
+// VULNERABLE
+public function getUser($id) {
+    return DB::select("SELECT * FROM users WHERE id = " . $id);
+}
+public function search($name) {
+    return DB::statement("SELECT * FROM users WHERE name = '" . $name . "'");
+}
+```
+
 **Fix:** PT-01 — use parameterized queries / prepared statements.
 
 ---
@@ -44,6 +56,7 @@ function getUser(username) {
 **Detection signals:**
 - Assignments such as `SECRET_KEY = "..."`, `API_KEY = "..."`, `password = "..."`, `token = "..."` with a literal string value.
 - Values that look like random hex, base64, JWT, or a password string assigned at module level or in a config dict.
+- PHP/Laravel: literal strings in `config/database.php` (`'password' => 'admin123'`), `APP_KEY` committed as plain value in `.env` tracked by git, or `$apiKey = "sk-live-..."` hardcoded in a service class.
 
 **Example (Python — vulnerable):**
 ```python
@@ -59,7 +72,20 @@ const SECRET_KEY = "super-secret-key-1234";
 const DB_PASSWORD = "admin123";
 ```
 
-**Fix:** PT-02 — move secrets to environment variables loaded via `python-dotenv` / `dotenv` npm package.
+**Example (PHP/Laravel — vulnerable):**
+```php
+// VULNERABLE — config/services.php
+'stripe' => [
+    'secret' => 'sk_live_AbCdEfGhIjKlMnOp',  // hardcoded live key
+],
+
+// VULNERABLE — in a service class
+class PaymentService {
+    private $apiKey = 'sk_live_AbCdEfGhIjKlMnOp';
+}
+```
+
+**Fix:** PT-02 — move secrets to environment variables loaded via `python-dotenv` / `dotenv` npm package / Laravel `.env` with `env('KEY')`.
 
 ---
 
@@ -73,6 +99,7 @@ const DB_PASSWORD = "admin123";
 - A single `.py` or `.js` file longer than 200 lines.
 - The same file contains `@app.route` / `app.get` calls AND raw SQL / ORM queries AND non-trivial business calculations.
 - Imports from `flask`, `sqlite3`, `smtplib`, `jwt`, `bcrypt` all present in one file.
+- PHP/Laravel: a single Controller class with methods >50 lines each; methods that call `DB::`, send emails via `Mail::`, run business calculations, AND return HTTP responses all in the same method body.
 
 **Example (Python — vulnerable):**
 ```python
@@ -90,6 +117,18 @@ app.post('/users', (req, res) => {
 });
 ```
 
+**Example (PHP/Laravel — vulnerable):**
+```php
+// VULNERABLE — OrderController@store is 80 lines mixing everything
+public function store(Request $request) {
+    // 20 lines of validation
+    // 15 lines of DB::insert() calls
+    // 20 lines of payment processing (Stripe API)
+    // 15 lines of Mail::send() and Log::info()
+    return response()->json(['status' => 'ok']);
+}
+```
+
 **Fix:** PT-03 — split file by domain entity (models, controllers, routes, services).
 
 ---
@@ -103,6 +142,7 @@ app.post('/users', (req, res) => {
 **Detection signals:**
 - Route path contains `/admin` but the handler function body has no call to an auth guard function, no `@require_admin` decorator, and no early return on missing/invalid token.
 - Auth middleware is defined but is not applied to the admin Blueprint or router.
+- PHP/Laravel: routes in `routes/web.php` or `routes/api.php` under an `/admin` prefix that lack `->middleware('auth')` or `->middleware('role:admin')` in the route definition or the controller constructor.
 
 **Example (Python — vulnerable):**
 ```python
@@ -122,7 +162,21 @@ app.get('/admin/users', (req, res) => {
 });
 ```
 
-**Fix:** PT-09 — apply `@require_admin` decorator / `requireAdmin` middleware.
+**Example (PHP/Laravel — vulnerable):**
+```php
+// VULNERABLE — routes/api.php
+Route::prefix('admin')->group(function () {
+    Route::get('/users', [AdminController::class, 'index']);  // no middleware!
+    Route::delete('/users/{id}', [AdminController::class, 'destroy']);
+});
+
+// SAFE
+Route::prefix('admin')->middleware(['auth:sanctum', 'role:admin'])->group(function () {
+    Route::get('/users', [AdminController::class, 'index']);
+});
+```
+
+**Fix:** PT-09 — apply `@require_admin` decorator / `requireAdmin` middleware / Laravel `->middleware('auth')`.
 
 ---
 
@@ -136,6 +190,7 @@ app.get('/admin/users', (req, res) => {
 - `INSERT INTO users` with a `password` column that receives the raw request value without a hash function call.
 - No import of `bcrypt`, `werkzeug.security`, `argon2`, `hashlib` (or similar) before the INSERT.
 - `SELECT` followed by a direct string comparison `user['password'] == request_password`.
+- PHP: `md5($password)` or `sha1($password)` used for password storage — these are NOT suitable for passwords (no salt, broken). Also: `$user->password === $request->password` (plain text comparison), or no call to `Hash::make()` / `password_hash()` before storing.
 
 **Example (Python — vulnerable):**
 ```python
@@ -155,7 +210,27 @@ function register(username, password) {
 }
 ```
 
-**Fix:** PT-04 — hash with bcrypt / werkzeug `generate_password_hash` before storing.
+**Example (PHP/Laravel — vulnerable):**
+```php
+// VULNERABLE
+public function register(Request $request) {
+    User::create([
+        'name'     => $request->name,
+        'email'    => $request->email,
+        'password' => md5($request->password),  // md5 — broken for passwords
+    ]);
+}
+
+// ALSO VULNERABLE
+public function login(Request $request) {
+    $user = User::where('email', $request->email)->first();
+    if ($user->password === $request->password) {  // plain-text comparison
+        // ...
+    }
+}
+```
+
+**Fix:** PT-04 — hash with bcrypt / werkzeug `generate_password_hash` / Laravel `Hash::make()` before storing.
 
 ---
 
@@ -168,6 +243,7 @@ function register(username, password) {
 **Detection signals:**
 - `jsonify(user)` or `res.json(user)` where `user` is a raw database row dict that contains `password`, `secret_key`, `token`, `ssn`, or `card_number` columns.
 - No explicit field whitelist or `.pop('password')` / `delete obj.password` before serialization.
+- PHP/Laravel: `return response()->json($user->toArray())` or `return $user` from a controller without an API Resource class — `toArray()` includes hidden fields only if `$hidden` is set; if it isn't set, the password column is exposed.
 
 **Example (Python — vulnerable):**
 ```python
@@ -187,7 +263,24 @@ app.get('/users/:id', (req, res) => {
 });
 ```
 
-**Fix:** PT-11 — sanitize response dicts/objects before serialization.
+**Example (PHP/Laravel — vulnerable):**
+```php
+// VULNERABLE — no $hidden defined, password exposed
+class User extends Model {
+    // missing: protected $hidden = ['password', 'remember_token'];
+}
+
+public function show($id) {
+    return response()->json(User::findOrFail($id)->toArray()); // leaks password
+}
+
+// SAFE — use API Resource to whitelist fields
+public function show($id) {
+    return new UserResource(User::findOrFail($id));
+}
+```
+
+**Fix:** PT-11 — sanitize response dicts/objects; use Laravel API Resources to whitelist fields.
 
 ---
 
@@ -200,6 +293,7 @@ app.get('/users/:id', (req, res) => {
 **Detection signals:**
 - `db_connection = sqlite3.connect(...)` or `conn = psycopg2.connect(...)` at module top level, outside any function.
 - The global variable is then used directly inside route handlers without passing it as a parameter.
+- PHP: `static $instance` used as a hand-rolled singleton for DB connections; `global $db` inside a function body; or a global `$_cache = []` array shared across requests via a poorly configured long-running server.
 
 **Example (Python — vulnerable):**
 ```python
@@ -222,7 +316,23 @@ app.get('/users', (req, res) => {
 });
 ```
 
-**Fix:** PT-05 — use Flask `g` / per-request connection factory, or inject dependency.
+**Example (PHP — vulnerable):**
+```php
+// VULNERABLE
+class Database {
+    private static $instance = null;
+    public static function getInstance() {
+        if (self::$instance === null) {
+            self::$instance = new PDO('mysql:host=localhost;dbname=app', 'user', 'pass');
+        }
+        return self::$instance;
+    }
+}
+// Used everywhere: Database::getInstance()->query(...)
+// Laravel already handles this correctly via the IoC container — use it
+```
+
+**Fix:** PT-05 — use Flask `g` / per-request connection factory / Laravel's IoC container with dependency injection.
 
 ---
 
@@ -235,6 +345,7 @@ app.get('/users', (req, res) => {
 **Detection signals:**
 - `import smtplib`, `import boto3`, `import twilio` (or similar) at the top of a routes/controllers file.
 - Email construction (`MIMEText`, `smtplib.SMTP`) or SMS/push API calls inside a route handler function body.
+- PHP/Laravel: `Mail::send(...)`, `Mail::queue(...)`, `Notification::send(...)`, `Http::post(...)` (external API calls), or Stripe/payment SDK calls directly inside a controller action method instead of in a Service class.
 
 **Example (Python — vulnerable):**
 ```python
@@ -255,7 +366,22 @@ app.post('/orders', async (req, res) => {
 });
 ```
 
-**Fix:** PT-08 — extract a `NotificationService` (or `EmailService`) module.
+**Example (PHP/Laravel — vulnerable):**
+```php
+// VULNERABLE — business logic in controller
+public function store(OrderRequest $request) {
+    $order = Order::create($request->validated());
+
+    // Side effects directly in controller — should be in a service
+    Mail::to($order->user->email)->send(new OrderConfirmed($order));
+    Http::post('https://api.payment.com/charge', ['amount' => $order->total]);
+    $order->user->notify(new OrderPlaced($order));
+
+    return new OrderResource($order);
+}
+```
+
+**Fix:** PT-08 — extract a `NotificationService` (or `EmailService`) module / Laravel Job / Event.
 
 ---
 
@@ -268,6 +394,7 @@ app.post('/orders', async (req, res) => {
 **Detection signals:**
 - A `login` route exists that returns a JWT or sets a session cookie.
 - Other routes that logically require login (e.g., `/profile`, `/orders`, `/settings`) have no `@login_required`, `@jwt_required`, or equivalent guard, and no manual token check at the start of the handler.
+- PHP/Laravel: `Route::get('/profile', ...)` without `->middleware('auth')` or `->middleware('auth:sanctum')`; controller constructor missing `$this->middleware('auth')` for protected actions.
 
 **Example (Python — vulnerable):**
 ```python
@@ -301,6 +428,7 @@ app.get('/profile', profileHandler); // no authenticateToken middleware applied
 **Detection signals:**
 - A `for` loop (or `.forEach`, `.map`) iterates over a query result set.
 - Inside the loop body, another `db.execute(...)` or `db.query(...)` call references the loop variable.
+- PHP/Laravel (Eloquent): accessing a relationship property (`$user->posts`, `$order->items`) inside a `foreach` loop on a collection that was not eager-loaded with `->with('posts')`. This is the most common N+1 form in Laravel.
 
 **Example (Python — vulnerable):**
 ```python
@@ -320,7 +448,22 @@ for (const order of orders) {
 }
 ```
 
-**Fix:** PT-06 — rewrite as a single JOIN query.
+**Example (PHP/Laravel — vulnerable):**
+```php
+// VULNERABLE — N+1: 1 query for users + N queries for posts
+$users = User::all();
+foreach ($users as $user) {
+    echo $user->posts->count();  // triggers a new DB query per user
+}
+
+// SAFE — 1 query with eager loading
+$users = User::with('posts')->get();
+foreach ($users as $user) {
+    echo $user->posts->count();  // no extra queries
+}
+```
+
+**Fix:** PT-06 — rewrite as a single JOIN query / use Eloquent eager loading with `->with()`.
 
 ---
 
@@ -371,6 +514,7 @@ function validateUpdateUser(data) { /* 10 identical lines + 1 extra check */ }
 - A `create` endpoint validates fields; the corresponding `update` endpoint does not.
 - Validation logic exists only in POST handlers but not in PUT/PATCH handlers for the same resource.
 - No schema library (Pydantic, Marshmallow, Joi, Zod) is used and validation is done ad-hoc, making gaps easy to miss.
+- PHP/Laravel: controller method that uses `$request->input()` or `$request->all()` without a preceding `$request->validate([...])` call or a `FormRequest` class injection.
 
 **Example (Python — vulnerable):**
 ```python
@@ -418,6 +562,7 @@ app.put('/products/:id', (req, res) => {
 - `print(` appears in application code outside of CLI scripts or REPL helpers.
 - `console.log(` used for operational events (errors, request processing, DB queries) rather than debug-only development output.
 - No `import logging` / `const winston = require('winston')` (or similar) in the file.
+- PHP: `echo`, `var_dump()`, `print_r()`, or `dd()` / `dump()` (Laravel helpers) left in production code paths. These are fine for local debugging but must never ship to production as they halt execution or expose internal state.
 
 **Example (Python — vulnerable):**
 ```python
@@ -438,7 +583,21 @@ function createUser(data) {
 }
 ```
 
-**Fix:** PT-10 — replace with `logging.getLogger(__name__)` / structured logger.
+**Example (PHP/Laravel — vulnerable):**
+```php
+// VULNERABLE — debugging helpers left in production code
+public function store(Request $request) {
+    $data = $request->all();
+    dd($data);  // halts execution — never in production!
+    var_dump($data);  // outputs raw PHP dump
+    echo "Creating order...";  // unstructured output
+
+    $order = Order::create($data);
+    return new OrderResource($order);
+}
+```
+
+**Fix:** PT-10 — replace with `Log::info()` / `Log::error()` (Laravel) / structured logger.
 
 ---
 
@@ -486,6 +645,7 @@ const discount = price * 0.15;
 - Custom cryptographic hash implementations (`badCrypto`, hand-rolled MD5/SHA1 for passwords).
 - `werkzeug.contrib` imports (removed in Werkzeug 1.0).
 - Node.js: `crypto.createCipher` (deprecated), `new Buffer()` (deprecated in favor of `Buffer.from()`).
+- PHP: `mysql_*` functions (removed in PHP 7 — use PDO or MySQLi); `mcrypt_*` functions (removed in PHP 7.2 — use `openssl_*`); `ereg()` / `split()` (removed in PHP 7 — use `preg_match()` / `preg_split()`); calling deprecated Laravel methods flagged by `php artisan deprecations`.
 
 **Example (Python — vulnerable):**
 ```python
@@ -507,4 +667,15 @@ const cipher = crypto.createCipher('aes192', password); // deprecated
 const buf = new Buffer(data); // deprecated
 ```
 
-**Fix:** Update to current stable APIs; use `bcrypt` for password hashing; use `Buffer.from()`.
+**Example (PHP — vulnerable):**
+```php
+// VULNERABLE — removed functions
+$conn = mysql_connect('localhost', 'user', 'pass');  // removed in PHP 7
+$result = mysql_query("SELECT * FROM users", $conn);
+
+$encrypted = mcrypt_encrypt(MCRYPT_RIJNDAEL_256, $key, $data, MCRYPT_MODE_ECB);  // removed PHP 7.2
+
+if (ereg('^[a-z]+$', $str)) { /* ... */ }  // removed in PHP 7
+```
+
+**Fix:** Update to current stable APIs; use `bcrypt` / `Hash::make()` for password hashing; use `Buffer.from()`; use PDO or MySQLi; use `openssl_encrypt()`; use `preg_match()`.

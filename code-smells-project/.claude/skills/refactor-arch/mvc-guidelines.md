@@ -184,6 +184,140 @@ module.exports = { createApp };
 
 ---
 
+## PHP / Laravel — Target Directory Structure
+
+Laravel already enforces MVC. The goal of Phase 3 is to fix violations **within** this structure, not to rebuild it from scratch.
+
+```
+project/
+├── app/
+│   ├── Http/
+│   │   ├── Controllers/
+│   │   │   ├── Api/
+│   │   │   │   ├── UserController.php       # Thin: validate → service → Resource
+│   │   │   │   ├── ProductController.php
+│   │   │   │   └── OrderController.php
+│   │   ├── Middleware/
+│   │   │   ├── Authenticate.php             # Built-in auth guard
+│   │   │   └── EnsureUserIsAdmin.php        # Custom role guard
+│   │   └── Requests/
+│   │       ├── StoreUserRequest.php         # FormRequest with validation rules
+│   │       ├── UpdateUserRequest.php
+│   │       └── StoreOrderRequest.php
+│   │
+│   ├── Models/
+│   │   ├── User.php                         # Eloquent model — $fillable, $hidden, relationships
+│   │   ├── Product.php
+│   │   └── Order.php
+│   │
+│   ├── Services/
+│   │   ├── OrderService.php                 # Business logic extracted from controller
+│   │   ├── PaymentService.php
+│   │   └── NotificationService.php
+│   │
+│   └── Http/Resources/
+│       ├── UserResource.php                 # API response whitelist (no password)
+│       ├── ProductResource.php
+│       └── OrderResource.php
+│
+├── routes/
+│   ├── api.php                              # API routes with middleware groups
+│   └── web.php                             # Web routes (if applicable)
+│
+├── database/
+│   ├── migrations/                          # Schema versioned via migrations
+│   └── seeders/                             # Test data
+│
+├── config/
+│   ├── app.php                              # References env() — no hardcoded values
+│   └── services.php                         # External services config via env()
+│
+├── .env                                     # Secrets — always in .gitignore
+├── .env.example                             # Template — safe to commit
+└── composer.json
+```
+
+### Key Laravel MVC Rules
+
+**Controller (thin):**
+```php
+// CORRECT — controller delegates to service, returns Resource
+class OrderController extends Controller
+{
+    public function __construct(private OrderService $orderService) {
+        $this->middleware('auth:sanctum');
+    }
+
+    public function store(StoreOrderRequest $request): JsonResponse {
+        $order = $this->orderService->createOrder(
+            $request->user(),
+            $request->validated()
+        );
+        return new OrderResource($order);
+    }
+}
+```
+
+**FormRequest (validation layer):**
+```php
+// app/Http/Requests/StoreOrderRequest.php
+class StoreOrderRequest extends FormRequest
+{
+    public function rules(): array {
+        return [
+            'product_id' => ['required', 'integer', 'exists:products,id'],
+            'quantity'   => ['required', 'integer', 'min:1'],
+        ];
+    }
+}
+```
+
+**Eloquent Model (data layer):**
+```php
+// app/Models/User.php
+class User extends Model
+{
+    protected $fillable = ['name', 'email', 'password'];
+    protected $hidden   = ['password', 'remember_token'];  // NEVER expose these
+
+    public function orders(): HasMany {
+        return $this->hasMany(Order::class);
+    }
+}
+```
+
+**API Resource (response whitelist):**
+```php
+// app/Http/Resources/UserResource.php
+class UserResource extends JsonResource
+{
+    public function toArray($request): array {
+        return [
+            'id'         => $this->id,
+            'name'       => $this->name,
+            'email'      => $this->email,
+            'created_at' => $this->created_at,
+            // 'password' deliberately omitted
+        ];
+    }
+}
+```
+
+**Routes (wiring only):**
+```php
+// routes/api.php
+Route::middleware('auth:sanctum')->group(function () {
+    Route::apiResource('orders', OrderController::class);
+    Route::apiResource('products', ProductController::class);
+
+    Route::middleware('role:admin')->prefix('admin')->group(function () {
+        Route::get('/users', [AdminController::class, 'index']);
+    });
+});
+```
+
+---
+
 ## Layer Responsibilities — Quick Reference
 
 ### Model Rules
